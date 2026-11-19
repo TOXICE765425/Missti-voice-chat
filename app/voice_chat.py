@@ -1,7 +1,7 @@
 """Telegram group voice assistant.
 
 Audio is processed only after /join and after the group is informed.
-Uses a Telethon user session for MTProto voice-chat access and PyTgCalls
+Uses a Pyrogram user session for MTProto voice-chat access and PyTgCalls
 for call media. Never expose SESSION_STRING in chat, GitHub, or logs.
 """
 import asyncio
@@ -35,19 +35,26 @@ class VoiceManager:
             return
         if not (API_ID and API_HASH and SESSION_STRING):
             raise RuntimeError("Set API_ID, API_HASH and SESSION_STRING in Render.")
-        from telethon import TelegramClient
-        from telethon.sessions import StringSession
+        from pyrogram import Client
         from pytgcalls import PyTgCalls
 
-        self.client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
-        await self.client.connect()
-        if not await self.client.is_user_authorized():
-            await self.client.disconnect()
+        # Pyrogram string session (in-memory). Do not use Telethon StringSession here.
+        self.client = Client(
+            name="missti_vc",
+            api_id=API_ID,
+            api_hash=API_HASH,
+            session_string=SESSION_STRING,
+            in_memory=True,
+        )
+        await self.client.start()
+        me = await self.client.get_me()
+        if not me:
+            await self.client.stop()
             self.client = None
-            raise RuntimeError("SESSION_STRING is not authorized. Generate a fresh user session.")
+            raise RuntimeError("SESSION_STRING is not authorized. Generate a fresh Pyrogram user session.")
         self.calls = PyTgCalls(self.client)
         await self.calls.start()
-        log.info("MTProto client and PyTgCalls initialized.")
+        log.info("Pyrogram MTProto client and PyTgCalls initialized (user_id=%s).", me.id)
 
     async def join(self, chat_id: int):
         async with self.lock:
@@ -109,7 +116,10 @@ class VoiceManager:
             except Exception:
                 pass
         if self.client:
-            await self.client.disconnect()
+            try:
+                await self.client.stop()
+            except Exception:
+                pass
 
     async def _listen_loop(self, chat_id: int):
         state = self.active[chat_id]
