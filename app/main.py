@@ -1,8 +1,6 @@
 import logging
-from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    KeyboardButton, ReplyKeyboardMarkup,
-)
+import asyncio
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, ContextTypes, filters,
@@ -10,7 +8,7 @@ from telegram.ext import (
 from .config import BOT_TOKEN, BOT_USERNAME, OWNER_IDS, SUPPORT_LINK, WAKE_WORD
 from .database import save_user, save_event, initialize_firebase
 from .ai_engine import ask_ai
-from .voice_chat import join_voice_chat, leave_voice_chat
+from .voice_chat import join_voice_chat, leave_voice_chat, voice_status, shutdown_voice
 from .keep_alive import start_health_server
 
 logging.basicConfig(
@@ -19,11 +17,9 @@ logging.basicConfig(
 )
 log = logging.getLogger("missti")
 
+
 def main_menu():
-    add_url = (
-        f"https://t.me/{BOT_USERNAME}?startgroup=true"
-        if BOT_USERNAME else "https://t.me/"
-    )
+    add_url = f"https://t.me/{BOT_USERNAME}?startgroup=true" if BOT_USERNAME else "https://t.me/"
     keyboard = [
         [InlineKeyboardButton("➕ Add To Your Group", url=add_url)],
         [InlineKeyboardButton("📚 Help & Commands", callback_data="help")],
@@ -32,17 +28,18 @@ def main_menu():
     ]
     return InlineKeyboardMarkup(keyboard)
 
+
 def help_text():
     return (
         "🤖 Missti — Telegram Voice Chat Assistant\n\n"
-        "/start — Open welcome menu\n"
-        "/help — Show commands\n"
-        "/join — Voice-chat setup/status\n"
-        "/leave — Leave voice chat (when voice engine is enabled)\n"
-        "/status — Show bot status\n\n"
+        "/start — Welcome menu\n/help — Commands\n/status — Bot status\n"
+        "/join — Join this group's active voice chat\n"
+        "/leave — Leave the voice chat\n\n"
         f"Wake word: {WAKE_WORD}\n"
-        "Voice chat audio automation is not enabled in this starter build."
+        "Voice processing is active only after /join. "
+        "Please tell group members before enabling it."
     )
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -50,11 +47,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_user(user)
     caption = (
         f"Welcome, {user.first_name if user else 'there'}! ❤️\n\n"
-        "I am Missti.\n\n"
-        "Telegram Voice Chat Assistant."
+        "I am Missti.\n\nTelegram Voice Chat Assistant."
     )
-    # Telegram Bot API can fetch the user's profile photo, but sending that
-    # photo as the bot's welcome image is intentionally best-effort.
     if user:
         try:
             photos = await context.bot.get_user_profile_photos(user.id, limit=1)
@@ -68,30 +62,47 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log.info("Could not fetch user's profile photo: %s", exc)
     await update.effective_message.reply_text(caption, reply_markup=main_menu())
 
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(help_text())
 
+
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    active = bool(chat and chat.type != "private" and voice_status(chat.id))
     await update.effective_message.reply_text(
-        "Missti is online.\nVoice-chat audio engine: not enabled in this starter build."
+        "Missti is online.\n"
+        f"Voice chat: {'connected' if active else 'not connected'}"
     )
+
 
 async def join_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
+    message = update.effective_message
     if not chat or chat.type == "private":
-        await update.effective_message.reply_text(
-            "Pehle mujhe group mein add karo, phir group ke voice chat mein /join use karo."
-        )
+        await message.reply_text("Mujhe group mein add karke group ke active voice chat mein /join use karo.")
         return
-    ok, message = await join_voice_chat(chat.id)
-    await update.effective_message.reply_text(message)
+    # Be transparent before audio processing starts.
+    await message.reply_text(
+        "ℹ️ Missti voice chat audio ko speech recognition ke liye process karegi "
+        "aur wake word 'Missti' par reply degi. Members ko inform/consent kara lo. Connecting..."
+    )
+    ok, result = await join_voice_chat(chat.id)
+    await message.reply_text(result)
+    if ok:
+        save_event(chat.id, "voice_joined", {"wake_word": WAKE_WORD})
+
 
 async def leave_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
-    if not chat:
+    if not chat or chat.type == "private":
+        await update.effective_message.reply_text("Ye command group mein use karo.")
         return
-    ok, message = await leave_voice_chat(chat.id)
-    await update.effective_message.reply_text(message)
+    ok, result = await leave_voice_chat(chat.id)
+    await update.effective_message.reply_text(result)
+    if ok:
+        save_event(chat.id, "voice_left")
+
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -102,19 +113,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not OWNER_IDS:
             await query.message.reply_text("Owner list abhi configure nahi hai.")
             return
-        rows = []
-        for index, owner_id in enumerate(OWNER_IDS, start=1):
-            rows.append([InlineKeyboardButton(
-                f"👑 Owner {index} · {owner_id}",
-                url=f"tg://user?id={owner_id}",
-            )])
-        await query.message.reply_text(
-            "Missti Owners:", reply_markup=InlineKeyboardMarkup(rows)
-        )
+        rows = [
+            [InlineKeyboardButton(f"👑 Owner {i}", url=f"tg://user?id={uid}")]
+            for i, uid in enumerate(OWNER_IDS, start=1)
+        ]
+        await query.message.reply_text("Missti Owners:", reply_markup=InlineKeyboardMarkup(rows))
+
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Text chat AI is available in private chats. Group text is answered only
-    # when the wake word is explicitly present.
     message = update.effective_message
     if not message or not message.text:
         return
@@ -124,27 +130,32 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     prompt = text
     if not is_private:
-        prompt = text.replace(WAKE_WORD, "", 1).strip(" ,:;")
+        import re
+        prompt = re.sub(re.escape(WAKE_WORD), "", text, count=1, flags=re.IGNORECASE).strip(" ,:;")
         if not prompt:
             await message.reply_text("Haan, bolo! ❤️")
             return
     await message.reply_text("💭 Soch rahi hoon...")
-    answer = ask_ai(prompt)
+    answer = await asyncio.to_thread(ask_ai, prompt)
     await message.reply_text(answer)
+
 
 async def post_init(application: Application):
     initialize_firebase()
     log.info("Missti bot initialized.")
+
+
+async def post_shutdown(application: Application):
+    await shutdown_voice()
+
 
 def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN environment variable is required.")
     start_health_server()
     application = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .post_init(post_init)
-        .build()
+        Application.builder().token(BOT_TOKEN)
+        .post_init(post_init).post_shutdown(post_shutdown).build()
     )
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
@@ -152,11 +163,10 @@ def main():
     application.add_handler(CommandHandler("join", join_command))
     application.add_handler(CommandHandler("leave", leave_command))
     application.add_handler(CallbackQueryHandler(button_callback))
-    application.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler)
-    )
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     log.info("Starting Missti AI VC bot...")
     application.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     main()

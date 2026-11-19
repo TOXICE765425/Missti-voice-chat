@@ -20,3 +20,7 @@ FIREBASE_CREDENTIALS_JSON = os.getenv("FIREBASE_CREDENTIALS_JSON", "")
 API_ID = int(os.getenv("API_ID", "0") or 0)
 API_HASH = os.getenv("API_HASH", "")
 SESSION_STRING = os.getenv("SESSION_STRING", "")
+
+STT_LANGUAGE = os.getenv("STT_LANGUAGE", "hi-IN")
+TTS_VOICE = os.getenv("TTS_VOICE", "hi-IN-SwaraNeural")
+AUDIO_CHUNK_SECONDS = max(3, min(8, int(os.getenv("AUDIO_CHUNK_SECONDS", "5"))))
