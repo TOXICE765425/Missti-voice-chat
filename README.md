@@ -1,66 +1,61 @@
-# Missti AI VC
+# Missti AI VC — Updated voice pipeline build
 
-Telegram bot starter project with a welcome menu, multiple owner links, Firebase user storage, GPT-5.2 API text replies, and a Render health endpoint.
+This update replaces the old `voice_chat.py` placeholder with a PyTgCalls/Telethon
+voice-chat integration, incoming audio recording pipeline, speech recognition,
+wake-word check, AI response, and TTS playback.
 
-## Folder layout
+## Important operating notes
 
-```text
-Missti-AI-VC/
-├── app/                 # All Python source files are kept here
-│   ├── __init__.py
-│   ├── main.py
-│   ├── config.py
-│   ├── database.py
-│   ├── ai_engine.py
-│   ├── voice_chat.py
-│   └── keep_alive.py
-├── requirements.txt
-├── render.yaml
-├── Procfile
-├── .env.example
-└── README.md
-```
+- This uses a **Telegram user MTProto session** to access group-call media. Keep
+  `SESSION_STRING` private; never commit it to GitHub or send it in chat.
+- Add Missti to a test group, start a voice chat, tell members that audio is
+  being processed, then run `/join`. Use `/leave` to stop processing.
+- Incoming audio is processed in short chunks and not intentionally retained
+  after leaving. Speech recognition uses Google's online recognition endpoint;
+  availability, accuracy, and language support are not guaranteed.
+- The voice pipeline is a practical integration, **not a claim of production
+  validation**. It must be tested in a real Telegram group call. PyTgCalls,
+  Telegram MTProto, network restrictions, and Render may affect call support.
+- Render Free may sleep/restart and cannot guarantee uninterrupted voice calls.
 
-## Important voice-chat limitation
+## Render settings
 
-This is a starter bot, not a completed live voice-chat assistant. The Telegram Bot API does not provide live group-call audio access. The `voice_chat.py` file is an explicit integration boundary: it does not claim to join calls. A complete voice assistant still needs a tested MTProto/PyTgCalls call connection, incoming audio decoding, speech recognition, wake-word detection, TTS generation, and outgoing audio streaming. Do not deploy this expecting `/join` to already work.
+Build command:
+`pip install -r requirements.txt`
+
+Start command:
+`python -m app.main`
+
+Health path:
+`/health`
 
 ## Environment variables
 
-Set these in Render:
+Required for bot:
+- `BOT_TOKEN`
+- `BOT_USERNAME`
+- `API_URL` (defaults to your supplied Missti API)
+- `API_MODEL` (defaults to `gpt-5.2`)
 
-- `BOT_TOKEN`: Telegram bot token from BotFather.
-- `BOT_USERNAME`: bot username without `@`.
-- `API_URL`: `https://misstupapachataiapi.vercel.app/api/chat`
-- `API_MODEL`: `gpt-5.2`
-- `OWNER_IDS`: comma-separated numeric Telegram user IDs, e.g. `111111111,222222222`.
-- `SUPPORT_LINK`: `https://t.me/misstu_pro`
-- `FIREBASE_DATABASE_URL`: Firebase Realtime Database URL.
-- `FIREBASE_CREDENTIALS_JSON`: service-account JSON as one-line JSON text.
-- `API_ID`, `API_HASH`, `SESSION_STRING`: reserved for the separate MTProto voice engine. Keep session string secret.
+Required for voice:
+- `API_ID`
+- `API_HASH`
+- `SESSION_STRING` (Telethon StringSession for a dedicated test account)
 
-## Local run
+Optional:
+- `STT_LANGUAGE=hi-IN` (use `en-IN` for English recognition)
+- `TTS_VOICE=hi-IN-SwaraNeural`
+- `AUDIO_CHUNK_SECONDS=5`
+- `OWNER_IDS`
+- Firebase variables
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-# Fill .env values, then:
-python -m app.main
-```
+## Commands
 
-## Render
+- `/start`
+- `/help`
+- `/status`
+- `/join`
+- `/leave`
 
-Create a new Web Service from this repository. Render can use `render.yaml`. Add all required environment variables in the Render dashboard. The `/health` endpoint is for service health checks and UptimeRobot monitoring.
-
-UptimeRobot pings do not guarantee that a Render Free service will remain awake or that a voice connection will remain uninterrupted.
-
-## Welcome menu
-
-- Add To Your Group: opens Telegram's add-to-group flow.
-- Help & Commands: shows available commands.
-- Support: opens `@misstu_pro`.
-- Boss: displays configured owner profile links.
-
-The user's own profile photo is used as the welcome image when Telegram permits the bot to retrieve it; otherwise the bot sends a text welcome.
+The bot announces that voice processing is active before connecting. Do not
+enable voice processing without informing the group participants.
