@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: missti-ai-vc
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m app.main
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: BOT_TOKEN
+        sync: false
+      - key: API_URL
+        value: https://misstupapachataiapi.vercel.app/api/chat
+      - key: API_MODEL
+        value: gpt-5.2
+      - key: OWNER_IDS
+        sync: false
+      - key: BOT_USERNAME
+        sync: false
+      - key: SUPPORT_LINK
+        value: https://t.me/misstu_pro
+      - key: FIREBASE_DATABASE_URL
+        sync: false
+      - key: FIREBASE_CREDENTIALS_JSON
+        sync: false
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: SESSION_STRING
+        sync: false
+      - key: WAKE_WORD
+        value: Missti
