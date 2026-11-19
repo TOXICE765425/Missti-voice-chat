@@ -7,5 +7,4 @@ telethon==1.42.0
 py-tgcalls==2.2.11
 edge-tts==7.2.0
 SpeechRecognition==3.14.3
-audioop-lts==0.2.2
 imageio-ffmpeg==0.6.0
