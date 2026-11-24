@@ -11,6 +11,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+from telegram.error import RetryAfter, TelegramError
 
 from .config import BOT_TOKEN, OWNER_IDS, SUPPORT_LINK, WAKE_WORD
 from .database import save_user, save_event, initialize_firebase
@@ -220,7 +221,36 @@ def main():
     )
 
     log.info("Starting Missti AI VC bot...")
-    application.run_polling(drop_pending_updates=True)
+
+    async def _runner():
+        await application.initialize()
+
+        # deleteWebhook pe flood aaye to hang mat karo — polling start karo
+        try:
+            await application.bot.delete_webhook(drop_pending_updates=True)
+            log.info("Webhook deleted.")
+        except RetryAfter as e:
+            wait = min(int(getattr(e, "retry_after", 30)) + 1, 90)
+            log.warning("Flood on delete_webhook. Waiting %ss then continuing...", wait)
+            await asyncio.sleep(wait)
+        except TelegramError as e:
+            log.warning("delete_webhook failed, continuing anyway: %s", e)
+
+        await application.start()
+        await application.updater.start_polling(
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES,
+        )
+        log.info("Bot is polling now.")
+
+        # process ko zinda rakho
+        stop = asyncio.Event()
+        await stop.wait()
+
+    try:
+        asyncio.run(_runner())
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":
