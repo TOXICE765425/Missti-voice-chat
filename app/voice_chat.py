@@ -18,12 +18,11 @@ STT_LANGUAGE = "hi-IN"
 TTS_VOICE = "hi-IN-SwaraNeural"
 AUDIO_CHUNK_SECONDS = 4
 
-# Wake word variants (STT galat sunne pe bhi detect ho)
 WAKE_VARIANTS = [
     "missti", "misty", "misti", "missy", "mistie",
-    "miss t", "mis t", "mi sti", "missti",
-    "मिस्टी", "मिस्सी", "मिस्टी", "मिस्ती", "मिस्टी",
-    "मिसटी", "मिस्टीजी", "हे मिस्टी", "hey missti",
+    "miss t", "mis t", "mi sti",
+    "मिस्टी", "मिस्सी", "मिस्ती", "मिसटी", "मिस्टीजी",
+    "हे मिस्टी", "hey missti",
 ]
 # =============================================================
 
@@ -31,30 +30,23 @@ _manager = None
 
 
 def _is_wake(text: str) -> bool:
-    """Fuzzy check - exact word zaroori nahi."""
     if not text:
         return False
     t = text.casefold().strip()
 
-    # Direct variant match
     for w in WAKE_VARIANTS:
         if w.casefold() in t:
             return True
 
-    # Partial / noisy STT (e.g. "mis ti hello", "mssti", "mistii")
     cleaned = re.sub(r"[^a-zA-Z0-9\u0900-\u097F\s]", " ", t)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    tokens = cleaned.split()
-
-    for tok in tokens:
+    for tok in cleaned.split():
         if len(tok) < 3:
             continue
-        # close to "missti" / "misty"
         if tok.startswith("mis") or tok.startswith("mist") or tok.startswith("miss"):
             return True
         if "मिस्" in tok or "मिस" in tok:
             return True
-
     return False
 
 
@@ -77,6 +69,7 @@ class VoiceManager:
         self.speaking = set()
         self.lock = asyncio.Lock()
         self._handler_registered = False
+        self._audio_params = None
 
     async def initialize(self):
         if self.calls:
@@ -88,6 +81,9 @@ class VoiceManager:
         from pyrogram import Client
         from pytgcalls import PyTgCalls, filters
         from pytgcalls.types import Device, Direction, StreamFrames
+        from pytgcalls.types.raw import AudioParameters
+
+        self._audio_params = AudioParameters(bitrate=48000, channels=2)
 
         self.client = Client(
             name="missti_vc",
@@ -131,7 +127,6 @@ class VoiceManager:
         self.last_process[chat_id] = now
 
         buf = self.buffers[chat_id]
-        # ~1.5 sec minimum
         if len(buf) < 48000 * 2 * 2 * 1.5:
             return
 
@@ -146,9 +141,11 @@ class VoiceManager:
             log.info("Transcript [%s]: %s", chat_id, transcript)
 
             if not _is_wake(transcript):
+                log.info("Wake word NOT detected in: %s", transcript)
                 return
 
             question = _remove_wake(transcript) or "Say hello briefly."
+            log.info("Wake OK. Question: %s", question)
             await self._answer_in_voice(chat_id, question)
         except Exception:
             log.exception("Voice processing error chat %s", chat_id)
@@ -162,9 +159,8 @@ class VoiceManager:
             from pytgcalls.types import (
                 RecordStream, GroupCallConfig, MediaStream, ExternalMedia
             )
-            from pytgcalls.types.raw import AudioParameters
 
-            params = AudioParameters(bitrate=48000, channels=2)
+            params = self._audio_params
 
             await self.calls.play(
                 chat_id,
@@ -232,63 +228,74 @@ class VoiceManager:
 
     async def _answer_in_voice(self, chat_id: int, prompt: str):
         try:
+            log.info("Asking AI: %s", prompt)
             answer = await asyncio.to_thread(ask_ai, prompt)
             if not answer:
                 answer = "Sorry, samajh nahi aaya."
+            log.info("AI answer: %s", answer[:200])
             await self._speak(chat_id, answer)
         except Exception:
             log.exception("Answer failed chat %s", chat_id)
 
     async def _speak(self, chat_id: int, text: str):
+        """Play TTS by streaming an audio FILE (more reliable than send_frame)."""
         import edge_tts
-        import subprocess
-        import imageio_ffmpeg
-        from pytgcalls.types import Device, ExternalMedia, MediaStream
+        from pytgcalls.types import MediaStream, ExternalMedia, RecordStream
         from pytgcalls.types.raw import AudioParameters
 
         self.speaking.add(chat_id)
+        tmp_dir = None
         try:
-            with tempfile.TemporaryDirectory(prefix="missti_") as tmp:
-                mp3 = os.path.join(tmp, "r.mp3")
-                raw = os.path.join(tmp, "r.raw")
+            tmp_dir = tempfile.mkdtemp(prefix="missti_")
+            mp3 = os.path.join(tmp_dir, "reply.mp3")
 
-                await edge_tts.Communicate(text[:1200], TTS_VOICE).save(mp3)
+            log.info("Generating TTS...")
+            await edge_tts.Communicate(text[:1200], TTS_VOICE).save(mp3)
+            size = os.path.getsize(mp3) if os.path.exists(mp3) else 0
+            log.info("TTS ready (%s bytes). Playing in VC...", size)
 
-                subprocess.run(
-                    [
-                        imageio_ffmpeg.get_ffmpeg_exe(),
-                        "-y", "-i", mp3,
-                        "-f", "s16le", "-acodec", "pcm_s16le",
-                        "-ac", "2", "-ar", "48000", raw,
-                    ],
-                    check=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+            if size < 100:
+                log.error("TTS file too small, skip play")
+                return
+
+            # Play mp3 file directly in the call
+            await self.calls.play(
+                chat_id,
+                MediaStream(
+                    mp3,
+                    video_flags=MediaStream.Flags.IGNORE,
+                ),
+            )
+
+            # Rough wait: ~1 sec per 12KB of mp3 is a safe underestimate
+            wait_s = max(3.0, min(45.0, size / 12000.0))
+            log.info("Playback waiting ~%.1fs", wait_s)
+            await asyncio.sleep(wait_s)
+
+            # Restore external stream + record so listening continues
+            params = self._audio_params or AudioParameters(bitrate=48000, channels=2)
+            try:
+                await self.calls.play(
+                    chat_id,
+                    MediaStream(ExternalMedia.AUDIO, params),
                 )
+                await self.calls.record(chat_id, RecordStream(True, params))
+                log.info("Listening restored after speak.")
+            except Exception as e:
+                log.warning("Could not restore listen stream: %s", e)
 
-                try:
-                    await self.calls.play(
-                        chat_id,
-                        MediaStream(
-                            ExternalMedia.AUDIO,
-                            AudioParameters(bitrate=48000, channels=2),
-                        ),
-                    )
-                except Exception:
-                    pass
-
-                frame_size = 48000 * 2 * 2 // 50  # 20ms
-                with open(raw, "rb") as f:
-                    while True:
-                        frame = f.read(frame_size)
-                        if not frame:
-                            break
-                        if len(frame) < frame_size:
-                            frame += b"\x00" * (frame_size - len(frame))
-                        await self.calls.send_frame(chat_id, Device.MICROPHONE, frame)
-                        await asyncio.sleep(0.02)
+        except Exception:
+            log.exception("Speak failed chat %s", chat_id)
         finally:
             self.speaking.discard(chat_id)
+            self.buffers[chat_id].clear()
+            if tmp_dir:
+                try:
+                    for name in os.listdir(tmp_dir):
+                        os.remove(os.path.join(tmp_dir, name))
+                    os.rmdir(tmp_dir)
+                except Exception:
+                    pass
 
 
 async def join_voice_chat(chat_id: int):
