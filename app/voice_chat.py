@@ -41,11 +41,12 @@ def _is_wake(text: str) -> bool:
     cleaned = re.sub(r"[^a-zA-Z0-9\u0900-\u097F\s]", " ", t)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     for tok in cleaned.split():
-        if len(tok) < 3:
+        if len(tok) < 4:
             continue
-        if tok.startswith("mis") or tok.startswith("mist") or tok.startswith("miss"):
+        # English-ish missti variants only (avoid मिस्र etc.)
+        if tok.startswith("misst") or tok.startswith("misty") or tok.startswith("misti"):
             return True
-        if "मिस्" in tok or "मिस" in tok:
+        if tok.startswith("missy") or tok.startswith("mistie"):
             return True
     return False
 
@@ -54,8 +55,8 @@ def _remove_wake(text: str) -> str:
     t = text
     for w in WAKE_VARIANTS:
         t = re.sub(re.escape(w), "", t, flags=re.IGNORECASE)
-    t = re.sub(r"\b(mis+|mist+|miss+)\w*\b", "", t, flags=re.IGNORECASE)
-    t = re.sub(r"(मिस्\w*|मिस\w*)", "", t)
+    t = re.sub(r"\b(misst\w*|misty\w*|misti\w*|missy\w*|mistie\w*)\b", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"(मिस्टी\w*|मिस्सी\w*|मिस्ती\w*|मिसटी\w*)", "", t)
     return t.strip(" ,:;.-")
 
 
@@ -238,7 +239,7 @@ class VoiceManager:
             log.exception("Answer failed chat %s", chat_id)
 
     async def _speak(self, chat_id: int, text: str):
-        """Play TTS by streaming an audio FILE (more reliable than send_frame)."""
+        """TTS: edge-tts first (needs >=7.3.1), gTTS fallback. Play mp3 in VC."""
         import edge_tts
         from pytgcalls.types import MediaStream, ExternalMedia, RecordStream
         from pytgcalls.types.raw import AudioParameters
@@ -250,29 +251,46 @@ class VoiceManager:
             mp3 = os.path.join(tmp_dir, "reply.mp3")
 
             log.info("Generating TTS...")
-            await edge_tts.Communicate(text[:1200], TTS_VOICE).save(mp3)
-            size = os.path.getsize(mp3) if os.path.exists(mp3) else 0
-            log.info("TTS ready (%s bytes). Playing in VC...", size)
+            ok = False
 
-            if size < 100:
-                log.error("TTS file too small, skip play")
+            # 1) edge-tts
+            try:
+                await edge_tts.Communicate(text[:1200], TTS_VOICE).save(mp3)
+                if os.path.exists(mp3) and os.path.getsize(mp3) > 200:
+                    ok = True
+                    log.info("TTS via edge-tts OK (%s bytes)", os.path.getsize(mp3))
+            except Exception as e:
+                log.warning("edge-tts failed: %s", e)
+
+            # 2) gTTS fallback
+            if not ok:
+                try:
+                    from gtts import gTTS
+
+                    def _gtts():
+                        gTTS(text=text[:500], lang="hi").save(mp3)
+
+                    await asyncio.to_thread(_gtts)
+                    if os.path.exists(mp3) and os.path.getsize(mp3) > 200:
+                        ok = True
+                        log.info("TTS via gTTS OK (%s bytes)", os.path.getsize(mp3))
+                except Exception as e:
+                    log.warning("gTTS failed: %s", e)
+
+            if not ok:
+                log.error("All TTS methods failed")
                 return
 
-            # Play mp3 file directly in the call
             await self.calls.play(
                 chat_id,
-                MediaStream(
-                    mp3,
-                    video_flags=MediaStream.Flags.IGNORE,
-                ),
+                MediaStream(mp3, video_flags=MediaStream.Flags.IGNORE),
             )
 
-            # Rough wait: ~1 sec per 12KB of mp3 is a safe underestimate
-            wait_s = max(3.0, min(45.0, size / 12000.0))
-            log.info("Playback waiting ~%.1fs", wait_s)
+            wait_s = max(3.0, min(45.0, os.path.getsize(mp3) / 12000.0))
+            log.info("Playing in VC (~%.1fs)", wait_s)
             await asyncio.sleep(wait_s)
 
-            # Restore external stream + record so listening continues
+            # restore listening
             params = self._audio_params or AudioParameters(bitrate=48000, channels=2)
             try:
                 await self.calls.play(
@@ -280,9 +298,9 @@ class VoiceManager:
                     MediaStream(ExternalMedia.AUDIO, params),
                 )
                 await self.calls.record(chat_id, RecordStream(True, params))
-                log.info("Listening restored after speak.")
+                log.info("Listening restored.")
             except Exception as e:
-                log.warning("Could not restore listen stream: %s", e)
+                log.warning("Restore listen failed: %s", e)
 
         except Exception:
             log.exception("Speak failed chat %s", chat_id)
